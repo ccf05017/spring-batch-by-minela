@@ -7,8 +7,8 @@ spring:
   batch:
     jdbc:
       initialize-schema: always
-#    job:
-#      names: ${job.name:createArticleJob}
+    job:
+      names: ${job.name:job}
   jpa:
     generate-ddl: true
     hibernate:
