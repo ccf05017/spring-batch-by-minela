@@ -8,7 +8,7 @@ spring:
     jdbc:
       initialize-schema: always
     job:
-      names: ${job.name:flowStepJob}
+      names: ${job.name:exploringJob}
   jpa:
     generate-ddl: true
     hibernate:
