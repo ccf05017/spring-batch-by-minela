@@ -6,6 +6,8 @@
 - Tasklet으로 구성된 가장 간단한 배치잡 실행
 - Tasklet?
     - `RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext)` 인터페이스를 갖고 있다.
+      - StepContribution: 아직 커밋되지 않은 현재 트랜잭션에 대한 정보(쓰기수, 읽기수 등)을 갖고 있다.
+      - ChunkContext: 실행 시점의 Job 정보를 나타내며, 처리 중인 Chunk 정보도 갖고 있다.
     - Step의 최소 실행 단위로 execute 메서드를 반복해서 실행한다.
 
 ## `user-stroy` 브랜치
@@ -28,3 +30,186 @@
   - Account: 고객 게좌정보
   - CustomerAccount: 연관관계 매핑 테이블(조인 테이블)
   - Transaction: 계좌에서 발생한 거래 정보
+
+## `job_and_step` 브랜치
+- Job, Step의 전반적인 내용을 설명하고 실습한다.
+- Job의 실행 방법
+  - 아래 두가지 구현체로 실행할 수 있다.
+    - CommandLineJobRunner: 일반적인 커맨드 라인 툴처럼 실행한다.
+    - JobRegistryBackgroundJobRunner: Spring 어플리케이션 백그라운드에서 대기하다가 Quartz, 스프링 스케줄러 등으로부터 명령을 받고 실행된다.
+  - 스프링부트에서는 별도로 JobLauncherCommandLineRunner를 사용한다.
+    - 별도 설정이 없다면 해당 어플리케이션 컨텍스트에 빈으로 등록된 모든 Job을 동시에 실행시킨다.
+  - 두가지 Runner의 실행이 같더라도 JobRunner 인터페이스를 별도로 갖고 있지 않다.
+  - 실제 단일 실행점은 JobLauncher로 두가지 Runner 모두 내부적으로 이 구현체를 사용한다.
+    - 추가로 JobLauncher는 스프링의 TaskExecutor를 사용해서 배치를 실행시킨다.
+- Job
+  - 배치에서 스텝을 어떻게 구성하고 어떤 순서로 구성할지 정한다.
+  - 일종의 청사진. 클래스와 같은 역할을 수행한다.
+- Job Instance
+  - Job의 논리적 실행을 나타낸다.
+  - JobRepository가 관리하는 JOB_INSTANCE 테이블에서 관리돤디.
+  - Instance의 식별자 = Job Name + Job Param
+    - 실제로 JOB_INSTANCE 테이블의 key는 Job 이름과 Job Param의 해쉬값이다.
+  - 한번 성공적으로 실행된 Job Instance는 절대 다시 실행할 수 없다.
+- Job Execution
+    - 실제 Job의 실행 시도를 나타낸다.
+    - BATCH_JOB_EXECUTION 테이블에서 관리된다.
+    - 실패한 Job Instance를 재실행하면 Job Execution이 새로 생긴다.
+    - JobExecution 실행 동안의 상태 정보는 BATCH_JOB_EXECUTION_CONTEXT 테이블에서 관리된다.
+- 어플리케이션 설정
+    - 설정파일 참조
+    - @EnableBatchProcessing 어노테이션 선언 시 배치에 필요한 인프라 코드들이 컨텍스트에 추가된다.
+        - 해당 어토테이션은 자동으로 구성 어노테이션으로 판단한다(=@Configuration 어노테이션 필요 없다.)
+- 잡 파라미터
+    - 잡에 필요한 정보 전달, Job의 구분자 구성요소 두가지 역할을 수행한다.
+    - BATCH_JOB_EXECUTION_PARAMS 테이블에서 관리된다.
+    - 커맨드라인에서 잡 파라미터 전달 시 ${key}=${value} 형태로 전달한다.
+        - ex) java -jar demo.jar name=poppo
+        - 스프링 배치 프로퍼티 전달하듯이 `-` 붙이면 안된다.
+        - 배치 어플리케이션의 `-`는 구분자로 사용하지 않는 잡 파라미터를 의미한다. (순수값 전달 목적)
+      - 코드 상에서 실제 값은 Map<T, JobParameter> 타입으로 전달된다.
+        - Key, Value 형태는 맞지만 Value가 JobParameter로 한번 더 감싸져있다.
+        - 이 덕분에 커맨드라인에서 전달할 때 값의 타입을 명시할 수 있다.
+            - ex) java -jar executionDate(date)=2020/12/27
+            - 배치에서 지원하는 타입 종류는 공식 문서 참조
+    - 접근 방법?
+        - Tasklet의 경우 ChunkContext 내의 StepContext를 타고 접근할 수 있다.
+        - 좀 더 일반적인 방법은 스코프를 통해 Spring의 Lazy Binding을 사용하는 방안이다.
+            - @Value 어노테이션을 활용한다.
+              - 사용예: @Value("#{jobParameters['${사용할 파라미터 key명}']}") ${타입} ${변수명}
+            - 사용시 @Scope 어노테이션 선언이 병행되야 한다.
+              - Scope 어노테이션은 해당 Scope의 실행 범위 전까지 빈 생성을 지연시킨다.
+              - Job, Custom(Step 포함)을 범위로 지정할 수 있다.
+              - 테스트 시 Scope 어노테이션을 제대로 잡아주지 않으면 테스트 데이터가 들어가기 전에 배치가 실행되는 비극이 발생할 수 있다.
+            - 예제에서는 이 방법을 사용한다.
+    - 유효성 검증
+        - JobParametersValidator 인터페이스으로 유효성 검증 기능을 구현할 수 있다.
+        - 기본적인 유효성 검증 수단으로 DefaultJobParametersValidator 구현체를 제공한다.
+            - 단순히 JobParameter가 전달됐는지만 확인한다.
+            - Optional 하게 전달받을 수 있는 JobParameter도 지정할 수 있다.
+        - 유효성 검증은 사용하고자 하는 JobParametersValidator 구현체를 Bean으로 등록해서 사용하면 된다.
+          - 당연히 사용할 Job에도 세팅해줘야 한다.
+        - 여러개의 유효성 검증을 사용하고자 한다면, CompositeJobParametersValidator를 Bean으로 등록하면 된다. 
+    - 자동으로 생성되는 잡 파라미터
+        - 잡 파라미터는 식별자로도 사용되기 때문에 매 실행마다 바꿔주는 귀찮은 작업이 필수적이다.
+        - 이 불편함을 해소하기 위해 배치 잡이 실행될 때마다 새로운 값을 잡 파라미터로 전달해주는 기능을 구현할 수 있다.
+        - JobParametersIncrementer 인터페이스를 구현해서 원하는 증가 로직을 직접 구현할 수 있다.
+        - 물론 간단하게 RunIdIncrementer 구현체를 사용해도 된다.
+        - 주의사항
+            - 유효성 검증 기능을 사용할 경우 자동으로 생성되는 파라미터도 유효성 검증 범위에 추가해야 한다.
+            - JobParametersIncrementer 구현체를 한번이라도 사용하면 이후 해당 잡 파라미터를 유효성 검증 범위에 무조건 포함해야 한다.
+                - 해당 로직은 증분 로직으로 이전 JobParam을 그대로 불러와서 사용하도록 구현되어있기 때문이다.
+                - 참고: https://jojoldu.tistory.com/487
+- 잡 리스너
+    - 잡의 생명주기의 여러 시점에 로직을 추가할 수 있도록 도와준다.
+    - 잡 실행과 관련하여 JobExecutionListener 인터페이스를 구현하여 잡 리스너의 역할을 수행할 수 있다.
+        - beforeJob, afterJob 두개의 메서드를 갖는다.
+        - 이름 그대로의 역할을 수행한다.
+    - 알림, 초기화, 정리 작업에 사용하기 아주 용이하다.
+    - 주의 사항
+        - afterJob 메서드는 잡의 수행 결과에 관계없이 실행된다.
+        - 잡의 수행 결과에 따라 변경되는 로직이 필요하다면 afterJob 메서드 내부에 구현이 필요하다.
+    - 인터페이스 구현 외 @AfterJob, @BeforeJob 애노테이션을 활용한 클래스 구현체를 리스너로 사용할 수도 있다.
+        - 애노테이션을 사용하면 JobExecutionListener 인터페이스를 상속받지 않아도 된다.
+        - 단, Job에 해당 리스너를 등록하기 위해 일반적인 리스너 등록과 다른 방법을 취한다.
+        ```java
+        jobBuilderFactory.get("basicJob")
+        ...
+        .listener(JobListenerFactoryBean.getListener(${애노테이션을 활용한 리스너}))
+        ```
+- ExecutionContext
+    - 배치 작업은 어플리케이션 특성상 상태를 갖고 있을 수 밖에 없다.
+        - 진행 중이던 작업이 도중에 실패했을 때 총 작업량 중 진행된 작업이 몇개인지 확인하는 등 상태값이 필수다.
+    - ExecutionContext는 배치 작업의 이런 특성을 위해 안전하게 배치 작업의 상태를 안전하게 저장하는 역할을 수행한다.
+        - 일종의 HttpSession과 비슷한 역할을 수행한다고 볼 수 있다.
+        - 다만, HttpSession과 다르게 ExecutionContext는 한 Execution에서 `여러개일 수 있다.`
+    - Job, Step은 각각 별도의 Execution을 갖는만큼 ExecutionContext 또한 Job, Step이 별개로 갖는다.
+    - 접근과 조작
+        - 실행 중인 Job, Step의 Context를 통해 옮겨다니며 접근할 수 있다.
+        - 단순히 Context의 값을 읽기만 할 것이라면 getXXXContext API를 통해 바로 Step에서 Job Context로, 반대로도 접근할 수 있다.
+            - 이런 접근법으로 불러온 Context는 읽기 전용이기 때문에 해당 값을 수정하더라도 반영되지 않는다.
+        - 위 동작들을 응용해서 Step간 데이터를 공유하는 것도 가능하다.
+            - ExecutionContextPromotionListener를 통해 StepExecutionContext의 값을 JobExecutionContext에 저장시킬 수 있다.
+            - 다음 Step에서는 JobExecutionContext를 참고하여 첫번재 Step에서 전달해준 값을 조회할 수 있다.
+            - 이러한 사용법은 첫번째 Step이 성공했을 때만 다음 Step에 어떤 값을 넘겨주고 싶을 때 아주 유용하다.
+
+- 스텝
+    - 잡의 구성요소를 담당한다.
+    - 스텝은 독립적이며, 순차적이다.
+        - 자체적으로 IO를 처리할 수 있으며, 모든 단위 작업의 기초가 된다.
+    - 청크를 어떻게 나눌지, 나눠진 청크를 어떤 트랜잭션 단위로 처리할지를 결정한다.
+    - 다음 스텝으로의 흐름 제어를 통해 조건부 스텝 등의 기능을 구현할 수 있다.
+    - Tasklet 스텝
+        - Tasklet 인터페이스의 구현체로 RepeatStatus.FINISHED를 반환할 때까지 `트랜잭션 범위 내에서` 반복적으로 코드 블록을 실행시킨다.
+    - Chunk 스텝
+        - Reader, Processor(optional), Writer를 통해 정해진 Chunk 단위씩 데이터를 처리한다.
+        - 각 Chunk 단위별로 트랜잭션이 나눠진다.
+        - Reader, Processor는 정해진 Chunk 크기에 도달할 때까지 하나씩 데이터를 처리하지만, Writer는 Chunk 단위를 한번에 처리한다.
+    - Tasklet의 종류
+        - Tasklet 인터페이스를 구현한 클래스.
+            - Tasklet 인터페이스는 메서드가 하나기 때문에 람다로 구현도 가능하다.
+        - CallableTaskletAdapter
+            - Callable<T> 인터페이스의 구현체를 Tasklet으로 사용할 수 있게 해준다.
+            - 이 어댑터를 이용한 Tasklet은 스프링 배치의 메인 스레드와 다른 별개의 스레드에서 실행된다.
+            - 다만, `병렬로 실행되지는 않는다.` 일반적인 동기 방식으로 Callable의 반환값이 올 때까지 배치 작업 스레드는 기다린다.
+            - 성능 향상을 위한 병렬 실행은 또다른 문제로 다른 설정을 통해 접근해야 한다.
+        - MethodInvokingTaskletAdapter
+            - 이미 존재하는 비즈니스 로직을 그대로 Taklet에서 사용할 때 주로 사용한다.
+            - 내부적으로 리플렉션을 이용해서 기존 코드를 감싼다.
+            - 감싼 기존 코드가 ExitStatus를 직접 리턴하는 게 아니라면 기본적으로 ExitStatus.COMPLETED를 반환한다.
+                - 감싼 기존 코드가 ExitStatus를 반환한다면, 해당값이 태스크릿에서 반환된다.
+        - SystemCommandTasklet
+            - 이름 그대로 시스템 명령어를 실행하는 배치 작업을 실행시킨다.
+            - 지정한 시스템 명령은 비동기로 실행된다.
+                - 이 때문에 타임아웃 설정에 각별히 신경써야 한다.
+                - interruptOnCancel 속성을 통해 배치 작업이 비정상적으로 종료됐을 때 실행시킨 시스템 명령 스레드의 강제 종료 여부를 결정할 수 있다.
+                - 그 외 시스템 명령에 영향을 주는 다양한 요소들을 설정할 수 있다.
+                    - workingDirectory: 명령을 실행할 위치를 지정할 수 있다.
+                    - systemProcessExitCodeMapper: 명령어가 종료된 시스템 반환 코드를 스프링 배치에 맞게 변환해준다.
+                    - terminateCheckInterval: 실행한 명령의 완료 여부를 확인하는 주기를 설정한다.
+                    - taskExecutor: 비동기 방식의 명령어를 실행해줄 Executor를 지정한다.
+                    - environmentParams: 명령어에서 사용할 환경변수를 지정할 수 있다.
+    - Chunk 기반 스텝
+        - 일정 Chunk 크기를 커밋 간격으로 지정하고, 지정된 크기만큼씩 트랜잭션 단위로 진행하는 스텝
+        - Chunk 크기 구성
+            - 일반적으로 고정된 크기의 Chunk를 사용한다.
+            - 하지만 종종 가변적인 Chunk 크기를 만들어야할 때가 있으며, 이때 CompletionPolicy를 이용할 수 있다.
+            - TimeoutTerminationPolicy를 통해 제한된 시간 내 처리된 아이템들을 Chunk 단위로 지정하는 것도 가능하다.
+            - CompositeCompletionPolicy를 이용하면 여러 CompletionPolicy 중 하나만 충족해도 Chunk 단위를 정의하는 게 가능하다.
+        - CompletionPolicy
+            - 완료 여부를 파악하기 위해 내부적으로 상태를 갖는다.
+            - isComplete, start, update 메서드를 갖고 있다.
+            - 가장 먼저 start 메서드가 실행되며, 내부 상태를 초기화 시킨다.
+            - update 아이템이 한개 처리될 때마다 내부 상태를 업데이트 한다.
+            - isComplete는 chunk 완료 여부를 파악한다.
+    - Step 리스너
+        - JobExecutionListener와 같은 역할을 하는 리스너 기능이 Step에도 존재한다.
+        - StepExecutionListener, ChunkExecutionListener가 존재하며 이름 그대로 동작한다.
+        - afterStep 메서드는 유일하게 반환타입을 갖고 있으며, 이를 유용하게 사용할 수 있다.
+            - 예를 들어, afterStep 메서드에서 기본적인 무결성 검증을 한뒤 데이터를 Step의 성공여부를 결정할 수 있다.
+    
+- 스텝 플로우
+    - 스프링은 스텝을 로직에 따라 유연하게 배치할 수 있는 여러 기능을 제공한다.
+    - 조건 로직
+        - 전이 기능을 통해 쉽게 조건 로직을 구현할 수 있다.
+        - 잡 구성에서 on 메서드를 사용하면 된다.
+        - ExitStatus를 통해 다음 스텝을 어떤 걸 실행할지 결정할 수 있다.
+        - ExitStatus는 기본적으로 문자열이기 때문에 아래 두가지 와일드카드를 제공한다.
+            - * : 0개 이상의 문자를 일치시킨다.
+            - ? : 1개의 문자를 일치시킨다.
+        - 이 외 JobExecutionDecider 인터페이스를 구현해서 프로그래밍 로직에 의해 Step 실행여부를 결정할 수 있다.
+            - JobExecutionDecider의 decide 메서드는 JobExecution, StepExecution을 인자로 받기 때문에 실행 상태에 따라 로직을 바꿀 수 있다.
+    - 스텝 플로우로 구성된 잡은 플로우 마지막에 반드시 end 메서드를 선언해줘야 한다.
+    - 이러한 플로우는 Bean으로 정의해서 외부 스텝화시키고 재사용할 수도 있다.
+        - 물론 과도한 사용은 오히려 재사용성과 가독성을 저하시키기 때문에 신중하게 사용해야 한다.
+    
+- 잡 종료하기
+    - 프로그래밍 방식으로 사용자의 로직에 의해 배치 잡이 종료되도록 할 수 있다.
+    - BatchStatus는 아래 세가지 값을 가질 수 있다.
+        - Completed: 성공적으로 종료된 잡으로 동일한 잡 이름, 파라미터로 재실행 할 수 없다.
+        - Failed: 실패한 잡으로 동일한 잡 이름, 파라미터로 재실행 할 수 있다.
+        - Stopped: Failed와 동일하게 재실행할 수 있으며, 재실행 시 지정한 Step부터 시작할 수 있다.
+    - Job 플로우 구성시 아래 메서드를 통해 특정 상태로 종료시킬 수 있다.
+        - end(): Completed 상태로 잡을 종료시킨다.
+        - fail(): Failed 상태로 잡을 종료시킨다.
+        - stopAndRestart(${재실행시 실행할 스텝}): Failed 상태로 잡을 종료시키지만, 재실행 시 지정된 스텝으로부터 재시작한다.
